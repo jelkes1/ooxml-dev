@@ -11,10 +11,13 @@ const INSTALLED = new WeakMap();
 
 export function analyticsAllowed(win, sourceProject) {
 	return Boolean(
+		Object.hasOwn(PROJECTS, sourceProject) &&
 		PROJECTS[sourceProject]?.includes(win?.location?.hostname) &&
 		typeof win?.gtag === "function" &&
 		win?.navigator?.globalPrivacyControl !== true &&
-		!["1", "yes"].includes(String(win?.navigator?.doNotTrack ?? win?.doNotTrack).toLowerCase()) &&
+		![win?.navigator?.doNotTrack, win?.doNotTrack].some((value) =>
+			["1", "yes"].includes(String(value).trim().toLowerCase()),
+		) &&
 		win?.superdocAnalyticsOptOut !== true &&
 		!/^\/(account|checkout|trial|sign-in|sign-up)(?:\/|$)/.test(win?.location?.pathname ?? ""),
 	);
@@ -31,7 +34,14 @@ export function classifyDestination(href, origin) {
 	}
 	if (url.protocol !== "https:" || url.username || url.password || url.port) return null;
 	if (url.hostname === "docs.superdoc.dev")
-		return /quickstart|getting-started/.test(url.pathname) ? "quickstart" : "docs";
+		return [
+			"/quickstart",
+			"/getting-started",
+			"/getting-started/quickstart",
+			"/editor/quickstart",
+		].includes(url.pathname.replace(/\/+$/, "") || "/")
+			? "quickstart"
+			: "docs";
 	if (!["superdoc.dev", "www.superdoc.dev"].includes(url.hostname)) return null;
 	if (url.hash === "#pricing" || url.pathname === "/pricing") return "pricing";
 	if (url.pathname === "/business-signup") return "signup";
@@ -41,7 +51,7 @@ export function classifyDestination(href, origin) {
 
 export function ctaPayload({ sourceProject, measurementId, destination, placement }) {
 	if (
-		!PROJECTS[sourceProject] ||
+		!Object.hasOwn(PROJECTS, sourceProject) ||
 		!/^G-[A-Z0-9]+$/.test(measurementId ?? "") ||
 		!["superdoc_home", "docs", "quickstart", "pricing", "signup"].includes(destination) ||
 		!PLACEMENTS.has(placement)
@@ -67,7 +77,12 @@ export function installGrowthAttribution({
 	win = globalThis.window,
 	doc = globalThis.document,
 } = {}) {
-	if (!win || !doc || !PROJECTS[sourceProject] || !/^G-[A-Z0-9]+$/.test(measurementId ?? ""))
+	if (
+		!win ||
+		!doc ||
+		!Object.hasOwn(PROJECTS, sourceProject) ||
+		!/^G-[A-Z0-9]+$/.test(measurementId ?? "")
+	)
 		return () => {};
 	if (INSTALLED.has(doc)) return () => {};
 	const click = (event) => {
@@ -79,6 +94,7 @@ export function installGrowthAttribution({
 			if (!destination) return;
 			// Only external referrals or a specific conversion CTA, never ordinary home navigation.
 			if (sourceProject === "homepage" && destination === "superdoc_home") return;
+			if (sourceProject === "docs" && ["docs", "quickstart"].includes(destination)) return;
 			const explicit = anchor
 				.closest("[data-growth-placement]")
 				?.getAttribute("data-growth-placement");
