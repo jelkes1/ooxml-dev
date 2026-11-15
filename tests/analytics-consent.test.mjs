@@ -108,3 +108,22 @@ test('credential-bearing queries and OAuth fragments cannot load GA, even with a
   const s=surface(); s.saved(true); s.start(); s.win.history.replaceState({},'','/#access_token=secret');
   assert.equal(s.win.location.assigned,'https://ooxml.dev/#access_token=secret'); assert.equal(s.win.superdocAnalyticsConsent,false);
 });
+
+for(const suffix of ['#access_token=abc?def','#id_token=abc?def','#%61ccess_token=abc?def','?oauth_token=secret','?oauth_verifier=secret','#oauth_token=secret','#/callback?oauth_verifier=secret','#OAUTH_TOKEN=abc?def']){
+ test(`credential parameter stays private: ${suffix}`,()=>{
+  const s=surface();s.win.location.href='https://ooxml.dev/'+suffix;s.saved(true);s.start();
+  assert.equal(s.scripts.length,0);assert.equal(s.win.superdocAnalyticsConsent,false);
+ });
+}
+test('credential-bearing fragments preserve the exact navigation target and disable measurement',()=>{
+ for(const method of ['pushState','replaceState']){
+  const s=surface();s.saved(true);s.start();s.win.history[method]({},'','/#access_token=abc?def');
+  assert.equal(s.win.location.assigned,'https://ooxml.dev/#access_token=abc?def');
+  assert.equal(s.win.superdocAnalyticsConsent,false);assert.equal(s.win['ga-disable-G-SYNTHETIC'],true);
+ }
+});
+test('ordinary public fragments and hash-router queries remain eligible after consent',()=>{
+ for(const suffix of ['#section?example','#/schema?search=public','#access_token_notes=public']){
+  const s=surface();s.win.location.href='https://ooxml.dev/'+suffix;s.saved(true);s.start();assert.equal(s.scripts.length,1);
+ }
+});

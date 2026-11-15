@@ -34,9 +34,13 @@ export function publicSurface(location, siteHost) {
 		const url = new URL(location.href);
 		// OAuth responses may put credentials in either the query or fragment,
 		// including hash-router callback queries. Inspect decoded parameter names.
-		const fragment = new URLSearchParams(url.hash.slice(1).replace(/^[^?]*\?/, ""));
+		const fragment = url.hash.slice(1);
+		const fragmentParameters = [
+			new URLSearchParams(fragment),
+			new URLSearchParams(fragment.includes("?") ? fragment.slice(fragment.indexOf("?") + 1) : ""),
+		];
 		const privateParameter =
-			/^(token|access_token|id_token|refresh_token|client_secret|key|email|auth|session|code|state)$/i;
+			/^(token|access_token|id_token|refresh_token|oauth_token|oauth_verifier|client_secret|key|email|auth|session|code|state)$/i;
 		return (
 			url.protocol === "https:" &&
 			[siteHost, "www." + siteHost].includes(url.hostname) &&
@@ -44,7 +48,7 @@ export function publicSurface(location, siteHost) {
 			!url.username &&
 			!url.password &&
 			!/^\/(account|checkout|trial|sign-in|sign-up|auth)(?:\/|$)/.test(url.pathname) &&
-			![...url.searchParams.keys(), ...fragment.keys()].some((key) => privateParameter.test(key))
+			![...url.searchParams.keys(), ...fragmentParameters.flatMap((parameters) => [...parameters.keys()])].some((key) => privateParameter.test(key))
 		);
 	} catch {
 		return false;
