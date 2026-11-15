@@ -48,7 +48,10 @@ export function publicSurface(location, siteHost) {
 			!url.username &&
 			!url.password &&
 			!/^\/(account|checkout|trial|sign-in|sign-up|auth)(?:\/|$)/.test(url.pathname) &&
-			![...url.searchParams.keys(), ...fragmentParameters.flatMap((parameters) => [...parameters.keys()])].some((key) => privateParameter.test(key))
+			![
+				...url.searchParams.keys(),
+				...fragmentParameters.flatMap((parameters) => [...parameters.keys()]),
+			].some((key) => privateParameter.test(key))
 		);
 	} catch {
 		return false;
