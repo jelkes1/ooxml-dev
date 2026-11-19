@@ -214,3 +214,87 @@ test("a newer section URL wins over a late previous lookup", async ({ page }) =>
 		await expect(page.locator("iframe")).toHaveAttribute("src", `${pdfOrigin}/ecma-376/part2.pdf#page=85&toolbar=0&navpanes=0`);
 	} finally { old.resolve(); }
 });
+
+test("an unknown part offers all official PDFs rather than guessing Part1", async ({ page }) => {
+	const pending = deferred();
+	await isolate(page, async route => {
+		await pending.promise;
+		await route.fulfill({ json: result(3, 12, "10.1") });
+	});
+	try {
+		await lookup(page, "section=10.1");
+		await expect(page.getByRole("link", { name: /^Open Part [1-4] PDF$/ })).toHaveCount(4);
+		await expect(page.getByRole("link", { name: "Open official PDF", exact: true })).toHaveCount(0);
+		for (let part = 1; part <= 4; part++) {
+			await expect(page.getByRole("link", { name: `Open Part ${part} PDF`, exact: true })).toHaveAttribute("href", `${pdfOrigin}/ecma-376/part${part}.pdf`);
+		}
+		pending.resolve();
+		await expect(page.locator("iframe")).toHaveAttribute("src", `${pdfOrigin}/ecma-376/part3.pdf#page=18&toolbar=0&navpanes=0`);
+	} finally { pending.resolve(); }
+});
+
+test("a section retry wins over an older text search", async ({ page }) => {
+	const oldSearch = deferred();
+	const newSection = deferred();
+	const oldDone = deferred();
+	let sectionAttempts = 0;
+	const isOldSearch = (request: import("@playwright/test").Request) => request.url().endsWith("/__test_api/search") && request.postDataJSON()?.query === "older search";
+	page.on("requestfinished", request => { if (isOldSearch(request)) oldDone.resolve(); });
+	page.on("requestfailed", request => { if (isOldSearch(request)) oldDone.resolve(); });
+	await isolate(page, async route => {
+		if (new URL(route.request().url()).pathname.endsWith("/section")) {
+			if (++sectionAttempts === 1) return route.fulfill({ status: 503, json: {} });
+			await newSection.promise;
+			return route.fulfill({ json: result() });
+		}
+		if (isOldSearch(route.request())) {
+			await oldSearch.promise;
+			return route.fulfill({ json: result(2, 77, "9.1") }).catch(() => {});
+		}
+		await route.fulfill({ status: 503, json: {} });
+	});
+	try {
+		await page.goto("/spec?section=17.3.1.24&part=1");
+		await expect(page.getByRole("alert")).toBeVisible();
+		await page.locator("textarea").fill("older search");
+		await page.locator("textarea").press("Enter");
+		await page.locator("textarea").fill("newer search");
+		await page.locator("textarea").press("Enter");
+		await expect(page.getByRole("button", { name: "Retry section lookup" })).toBeEnabled();
+		await page.getByRole("button", { name: "Retry section lookup" }).click();
+		await expect.poll(() => sectionAttempts).toBe(2);
+		oldSearch.resolve();
+		await oldDone.promise;
+		await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+		await expect(page.locator("iframe")).toHaveCount(0, { timeout: 1500 });
+		newSection.resolve();
+		await expect(page.locator("iframe")).toHaveAttribute("src", `${part1}#page=249&toolbar=0&navpanes=0`);
+	} finally { oldSearch.resolve(); newSection.resolve(); }
+});
+
+for (const initialSection of [true, false]) {
+	test(`a failed text search retains its query and retries search (section=${initialSection})`, async ({ page }) => {
+		let sectionAttempts = 0;
+		const queries: string[] = [];
+		await isolate(page, async route => {
+			if (new URL(route.request().url()).pathname.endsWith("/section")) {
+				sectionAttempts++;
+				return route.fulfill({ status: 503, json: {} });
+			}
+			queries.push(route.request().postDataJSON().query);
+			if (queries.length === 1) return route.fulfill({ status: 503, json: {} });
+			return route.fulfill({ json: result(2, 77, "9.1") });
+		});
+		await page.goto(initialSection ? "/spec?section=17.3.1.24&part=1" : "/spec");
+		if (initialSection) await expect(page.getByRole("alert")).toBeVisible();
+		await page.locator("textarea").fill("package relationships");
+		await page.locator("textarea").press("Enter");
+		await expect(page.getByRole("alert").filter({ hasText: "Search unavailable" })).toBeVisible();
+		await expect(page.locator("textarea")).toHaveValue("package relationships");
+		if (!initialSection) await expect(page.locator("iframe")).toHaveAttribute("src", `${part1}#page=11&toolbar=0&navpanes=0`);
+		await page.getByRole("button", { name: "Retry search", exact: true }).click();
+		await expect(page.locator("iframe")).toHaveAttribute("src", `${pdfOrigin}/ecma-376/part2.pdf#page=85&toolbar=0&navpanes=0`);
+		expect(queries).toEqual(["package relationships", "package relationships"]);
+		expect(sectionAttempts).toBe(initialSection ? 1 : 0);
+	});
+}
