@@ -73,15 +73,16 @@ function SpecExplorerView({
 	const inputRef = useRef<HTMLTextAreaElement>(null);
 	const hasAutoSearched = useRef(false);
 	// Set this before the first render, not in an effect that already mounted page1.
-	const [sectionStatus, setSectionStatus] = useState<"pending" | "ready" | "missing" | "error">(
-		initialSection ? "pending" : "ready",
-	);
-	const sectionRequest = useRef<AbortController | null>(null);
-	const sectionRequestId = useRef(0);
-	const officialPdf = (PDF_CONFIG[Number(initialPart)] || PDF_CONFIG[1]).url;
-	const cancelSectionLookup = useCallback(() => {
-		sectionRequestId.current++;
-		sectionRequest.current?.abort();
+	const [viewerStatus, setViewerStatus] = useState<
+		"pending" | "ready" | "missing" | "error" | "searching" | "search-error" | "search-missing"
+	>(initialSection ? "pending" : "ready");
+	const [searchFailed, setSearchFailed] = useState(false);
+	const activeRequest = useRef<AbortController | null>(null);
+	const activeRequestId = useRef(0);
+	const officialPdf = PDF_CONFIG[Number(initialPart)]?.url;
+	const cancelActiveRequest = useCallback(() => {
+		activeRequestId.current++;
+		activeRequest.current?.abort();
 	}, []);
 
 	// Preload the default PDF
@@ -100,59 +101,72 @@ function SpecExplorerView({
 	}, [initialSection]);
 
 	// Submit search
-	const handleSubmit = useCallback(async () => {
-		const query = search.trim();
-		if (!query || query === submittedSearch) return;
+	const handleSubmit = useCallback(
+		async (retry = false) => {
+			const query = search.trim();
+			if (!query || (query === submittedSearch && !retry && !searchFailed)) return;
 
-		cancelSectionLookup();
-		setSubmittedSearch(query);
-		setIsLoading(true);
+			cancelActiveRequest();
+			const requestId = activeRequestId.current;
+			const controller = new AbortController();
+			activeRequest.current = controller;
+			setSubmittedSearch(query);
+			setIsLoading(true);
+			setSearchFailed(false);
+			setViewerStatus((status) => (status === "ready" ? status : "searching"));
 
-		try {
-			const res = await fetch(`${import.meta.env.VITE_API_URL}/search`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ query, limit: 10 }),
-			});
-			if (!res.ok) throw new Error("Search unavailable");
-			const data: MCPSearchResponse = await res.json();
+			try {
+				const res = await fetch(`${import.meta.env.VITE_API_URL}/search`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ query, limit: 10 }),
+					signal: controller.signal,
+				});
+				if (!res.ok) throw new Error("Search unavailable");
+				const data: MCPSearchResponse = await res.json();
+				if (requestId !== activeRequestId.current) return;
 
-			const transformed: SpecSearchResult[] = data.results.map((r) => ({
-				id: `spec-${r.id}`,
-				sectionId: r.sectionId || "",
-				title: r.title || r.content.slice(0, 60),
-				description: r.title ? r.content.slice(0, 120) : undefined,
-				partNumber: r.partNumber,
-				pageNumber: r.pageNumber,
-			}));
+				const transformed: SpecSearchResult[] = data.results.map((r) => ({
+					id: `spec-${r.id}`,
+					sectionId: r.sectionId || "",
+					title: r.title || r.content.slice(0, 60),
+					description: r.title ? r.content.slice(0, 120) : undefined,
+					partNumber: r.partNumber,
+					pageNumber: r.pageNumber,
+				}));
 
-			setResults(transformed);
-			setSelectedIndex(0);
-			if (transformed.length > 0) {
-				setSelectedResult(transformed[0]);
-				setSectionStatus("ready");
-			} else {
-				setSectionStatus((status) => (status === "ready" ? status : "missing"));
+				setResults(transformed);
+				setSelectedIndex(0);
+				if (transformed.length > 0) {
+					setSelectedResult(transformed[0]);
+					setViewerStatus("ready");
+				} else {
+					setViewerStatus((status) => (status === "ready" ? status : "search-missing"));
+				}
+			} catch (err) {
+				if (requestId !== activeRequestId.current) return;
+				console.error("Search failed:", err);
+				setResults([]);
+				setSearchFailed(true);
+				setViewerStatus((status) => (status === "ready" ? status : "search-error"));
+			} finally {
+				if (requestId === activeRequestId.current) setIsLoading(false);
 			}
-		} catch (err) {
-			console.error("Search failed:", err);
-			setResults([]);
-			setSectionStatus((status) => (status === "ready" ? status : "error"));
-		} finally {
-			setIsLoading(false);
-		}
-	}, [search, submittedSearch, cancelSectionLookup]);
+		},
+		[search, submittedSearch, searchFailed, cancelActiveRequest],
+	);
 
 	// Fetch a specific section by ID (e.g., ?section=17.3.1.24&part=1)
 	const handleSectionLookup = useCallback(async () => {
 		if (!initialSection) return;
-		cancelSectionLookup();
-		const requestId = sectionRequestId.current;
+		cancelActiveRequest();
+		const requestId = activeRequestId.current;
 		const controller = new AbortController();
-		sectionRequest.current = controller;
+		activeRequest.current = controller;
 		const timeout = window.setTimeout(() => controller.abort(), 15_000);
 		setIsLoading(true);
-		setSectionStatus("pending");
+		setSearchFailed(false);
+		setViewerStatus("pending");
 		setSearch(initialSection);
 		try {
 			const params = new URLSearchParams({ id: initialSection });
@@ -163,7 +177,7 @@ function SpecExplorerView({
 			if (!res.ok) throw new Error("Section lookup unavailable");
 			const data = (await res.json()) as { results: MCPSearchResult[] };
 			if (!Array.isArray(data?.results)) throw new Error("Invalid section response");
-			if (requestId !== sectionRequestId.current) return;
+			if (requestId !== activeRequestId.current) return;
 
 			const mapped = data.results.filter((r) => {
 				if (!r || typeof r !== "object") return false;
@@ -196,20 +210,20 @@ function SpecExplorerView({
 			setSelectedIndex(0);
 			if (transformed.length > 0) {
 				setSelectedResult(transformed[0]);
-				setSectionStatus("ready");
+				setViewerStatus("ready");
 			} else {
 				setSelectedResult(null);
-				setSectionStatus("missing");
+				setViewerStatus("missing");
 			}
 		} catch (err) {
-			if (requestId !== sectionRequestId.current) return;
+			if (requestId !== activeRequestId.current) return;
 			console.error("Section lookup failed:", err);
-			setSectionStatus("error");
+			setViewerStatus("error");
 		} finally {
 			window.clearTimeout(timeout);
-			if (requestId === sectionRequestId.current) setIsLoading(false);
+			if (requestId === activeRequestId.current) setIsLoading(false);
 		}
-	}, [initialSection, initialPart, cancelSectionLookup]);
+	}, [initialSection, initialPart, cancelActiveRequest]);
 
 	useEffect(() => {
 		let active = true;
@@ -220,18 +234,21 @@ function SpecExplorerView({
 		});
 		return () => {
 			active = false;
-			cancelSectionLookup();
+			cancelActiveRequest();
 		};
-	}, [initialSection, handleSectionLookup, cancelSectionLookup]);
+	}, [initialSection, handleSectionLookup, cancelActiveRequest]);
 
 	// Auto-search or section lookup on load
 	useEffect(() => {
-		if (hasAutoSearched.current) return;
-		hasAutoSearched.current = true;
-
-		if (!initialSection && initialQuery) {
-			handleSubmit();
-		}
+		let active = true;
+		queueMicrotask(() => {
+			if (!active || hasAutoSearched.current) return;
+			hasAutoSearched.current = true;
+			if (!initialSection && initialQuery) void handleSubmit();
+		});
+		return () => {
+			active = false;
+		};
 	}, [initialSection, initialQuery, handleSubmit]);
 
 	// Handle Enter key to submit
@@ -292,6 +309,8 @@ function SpecExplorerView({
 		// Could sync page changes back to state if needed
 		console.log("Page changed to:", page);
 	}, []);
+	const waitingForPage = viewerStatus === "pending" || viewerStatus === "searching";
+	const showingSearch = viewerStatus.startsWith("search");
 
 	return (
 		<div className="flex h-screen flex-col overflow-hidden">
@@ -320,6 +339,19 @@ function SpecExplorerView({
 								</kbd>
 							</span>
 						</div>
+						{searchFailed && viewerStatus === "ready" && (
+							<div role="alert" className="mt-4 space-y-2 text-sm">
+								<p>Search unavailable. Your query is still in the search box.</p>
+								<button
+									type="button"
+									onClick={() => void handleSubmit(true)}
+									disabled={isLoading}
+									className="rounded border border-[var(--color-border)] px-3 py-2 disabled:opacity-50"
+								>
+									Retry search
+								</button>
+							</div>
+						)}
 					</div>
 
 					{/* Results */}
@@ -393,7 +425,7 @@ function SpecExplorerView({
 
 				{/* PDF viewer */}
 				<div className="overflow-hidden">
-					{sectionStatus === "ready" ? (
+					{viewerStatus === "ready" ? (
 						<PdfViewer
 							partNumber={selectedResult?.partNumber ?? 1}
 							pageNumber={selectedResult?.pageNumber ?? 1}
@@ -401,24 +433,39 @@ function SpecExplorerView({
 						/>
 					) : (
 						<div className="flex h-full items-center justify-center bg-[var(--color-bg-secondary)] p-8">
-							<div
-								className="max-w-md space-y-4"
-								role={sectionStatus === "pending" ? "status" : "alert"}
-							>
+							<div className="max-w-md space-y-4" role={waitingForPage ? "status" : "alert"}>
 								<h2 className="text-lg font-semibold">
-									{sectionStatus === "pending"
-										? "Loading requested section"
-										: sectionStatus === "missing"
-											? "No mapped page found"
-											: "Section lookup unavailable"}
+									{showingSearch
+										? viewerStatus === "searching"
+											? "Searching specification"
+											: viewerStatus === "search-error"
+												? "Search unavailable"
+												: "No search results"
+										: viewerStatus === "pending"
+											? "Loading requested section"
+											: viewerStatus === "missing"
+												? "No mapped page found"
+												: "Section lookup unavailable"}
 								</h2>
 								<p className="text-sm text-[var(--color-text-secondary)]">
-									{sectionStatus === "pending"
-										? "The specification will open at the requested section when its page is available."
-										: "Try the section lookup again, search for another section, or open the official PDF directly."}
+									{showingSearch
+										? "Your query is still in the search box. You can retry the search, change your query, or open the official specification."
+										: viewerStatus === "pending"
+											? "The specification will open at the requested section when its page is available."
+											: "Try the section lookup again, search for another section, or open the official PDF directly."}
 								</p>
 								<div className="flex flex-wrap items-center gap-4 text-sm">
-									{sectionStatus !== "pending" && (
+									{showingSearch && !waitingForPage && (
+										<button
+											type="button"
+											onClick={() => void handleSubmit(true)}
+											disabled={isLoading}
+											className="rounded border border-[var(--color-border)] px-3 py-2 disabled:opacity-50"
+										>
+											Retry search
+										</button>
+									)}
+									{!waitingForPage && initialSection && (
 										<button
 											type="button"
 											onClick={() => void handleSectionLookup()}
@@ -428,14 +475,28 @@ function SpecExplorerView({
 											Retry section lookup
 										</button>
 									)}
-									<a
-										href={officialPdf}
-										target="_blank"
-										rel="noopener noreferrer"
-										className="underline"
-									>
-										Open official PDF
-									</a>
+									{officialPdf ? (
+										<a
+											href={officialPdf}
+											target="_blank"
+											rel="noopener noreferrer"
+											className="underline"
+										>
+											Open official PDF
+										</a>
+									) : (
+										Object.entries(PDF_CONFIG).map(([part, config]) => (
+											<a
+												key={part}
+												href={config.url}
+												target="_blank"
+												rel="noopener noreferrer"
+												className="underline"
+											>
+												Open Part {part} PDF
+											</a>
+										))
+									)}
 								</div>
 							</div>
 						</div>

@@ -228,6 +228,7 @@ test("an unknown part offers all official PDFs rather than guessing Part1", asyn
 		for (let part = 1; part <= 4; part++) {
 			await expect(page.getByRole("link", { name: `Open Part ${part} PDF`, exact: true })).toHaveAttribute("href", `${pdfOrigin}/ecma-376/part${part}.pdf`);
 		}
+		await page.screenshot({ path: test.info().outputPath("unknown-part.png") });
 		pending.resolve();
 		await expect(page.locator("iframe")).toHaveAttribute("src", `${pdfOrigin}/ecma-376/part3.pdf#page=18&toolbar=0&navpanes=0`);
 	} finally { pending.resolve(); }
@@ -291,6 +292,7 @@ for (const initialSection of [true, false]) {
 		await page.locator("textarea").press("Enter");
 		await expect(page.getByRole("alert").filter({ hasText: "Search unavailable" })).toBeVisible();
 		await expect(page.locator("textarea")).toHaveValue("package relationships");
+		await page.screenshot({ path: test.info().outputPath(`search-error-section-${initialSection}.png`) });
 		if (!initialSection) await expect(page.locator("iframe")).toHaveAttribute("src", `${part1}#page=11&toolbar=0&navpanes=0`);
 		await page.getByRole("button", { name: "Retry search", exact: true }).click();
 		await expect(page.locator("iframe")).toHaveAttribute("src", `${pdfOrigin}/ecma-376/part2.pdf#page=85&toolbar=0&navpanes=0`);
