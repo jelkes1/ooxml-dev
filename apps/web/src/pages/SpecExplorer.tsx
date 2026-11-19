@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Navbar } from "../components/Navbar";
 import { PdfViewer } from "../components/PdfViewer";
+import { PDF_CONFIG } from "../components/pdfNavigation";
 import { getSeoMeta } from "../data/seo";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
 
@@ -38,11 +39,30 @@ interface SpecSearchResult {
 const DEFAULT_PDF_URL = "https://cdn.ooxml.dev/ecma-376/part1.pdf";
 
 export function SpecExplorer() {
-	useDocumentTitle(getSeoMeta("/spec").title);
 	const [searchParams] = useSearchParams();
 	const initialQuery = searchParams.get("q") || "";
 	const initialSection = searchParams.get("section") || "";
 	const initialPart = searchParams.get("part") || "";
+	return (
+		<SpecExplorerView
+			key={JSON.stringify([initialQuery, initialSection, initialPart])}
+			initialQuery={initialQuery}
+			initialSection={initialSection}
+			initialPart={initialPart}
+		/>
+	);
+}
+
+function SpecExplorerView({
+	initialQuery,
+	initialSection,
+	initialPart,
+}: {
+	initialQuery: string;
+	initialSection: string;
+	initialPart: string;
+}) {
+	useDocumentTitle(getSeoMeta("/spec").title);
 	const [search, setSearch] = useState(initialQuery);
 	const [submittedSearch, setSubmittedSearch] = useState("");
 	const [results, setResults] = useState<SpecSearchResult[]>([]);
@@ -52,9 +72,23 @@ export function SpecExplorer() {
 	const resultsRef = useRef<HTMLDivElement>(null);
 	const inputRef = useRef<HTMLTextAreaElement>(null);
 	const hasAutoSearched = useRef(false);
+	// Set this before the first render, not in an effect that already mounted page1.
+	const [sectionStatus, setSectionStatus] = useState<"pending" | "ready" | "missing" | "error">(
+		initialSection ? "pending" : "ready",
+	);
+	const sectionRequest = useRef<AbortController | null>(null);
+	const sectionRequestId = useRef(0);
+	const officialPdf = (PDF_CONFIG[Number(initialPart)] || PDF_CONFIG[1]).url;
+	const cancelSectionLookup = useCallback(() => {
+		sectionRequestId.current++;
+		sectionRequest.current?.abort();
+	}, []);
 
 	// Preload the default PDF
 	useEffect(() => {
+		// An explicit section may resolve to another part. Its viewer loads the
+		// mapped official PDF directly, without preloading an unrelated Part1.
+		if (initialSection) return;
 		const link = document.createElement("link");
 		link.rel = "preload";
 		link.as = "document";
@@ -63,13 +97,14 @@ export function SpecExplorer() {
 		return () => {
 			document.head.removeChild(link);
 		};
-	}, []);
+	}, [initialSection]);
 
 	// Submit search
 	const handleSubmit = useCallback(async () => {
 		const query = search.trim();
 		if (!query || query === submittedSearch) return;
 
+		cancelSectionLookup();
 		setSubmittedSearch(query);
 		setIsLoading(true);
 
@@ -79,6 +114,7 @@ export function SpecExplorer() {
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({ query, limit: 10 }),
 			});
+			if (!res.ok) throw new Error("Search unavailable");
 			const data: MCPSearchResponse = await res.json();
 
 			const transformed: SpecSearchResult[] = data.results.map((r) => ({
@@ -94,26 +130,58 @@ export function SpecExplorer() {
 			setSelectedIndex(0);
 			if (transformed.length > 0) {
 				setSelectedResult(transformed[0]);
+				setSectionStatus("ready");
+			} else {
+				setSectionStatus((status) => (status === "ready" ? status : "missing"));
 			}
 		} catch (err) {
 			console.error("Search failed:", err);
 			setResults([]);
+			setSectionStatus((status) => (status === "ready" ? status : "error"));
 		} finally {
 			setIsLoading(false);
 		}
-	}, [search, submittedSearch]);
+	}, [search, submittedSearch, cancelSectionLookup]);
 
 	// Fetch a specific section by ID (e.g., ?section=17.3.1.24&part=1)
 	const handleSectionLookup = useCallback(async () => {
 		if (!initialSection) return;
+		cancelSectionLookup();
+		const requestId = sectionRequestId.current;
+		const controller = new AbortController();
+		sectionRequest.current = controller;
+		const timeout = window.setTimeout(() => controller.abort(), 15_000);
 		setIsLoading(true);
+		setSectionStatus("pending");
+		setSearch(initialSection);
 		try {
 			const params = new URLSearchParams({ id: initialSection });
 			if (initialPart) params.set("part", initialPart);
-			const res = await fetch(`${import.meta.env.VITE_API_URL}/section?${params}`);
+			const res = await fetch(`${import.meta.env.VITE_API_URL}/section?${params}`, {
+				signal: controller.signal,
+			});
+			if (!res.ok) throw new Error("Section lookup unavailable");
 			const data = (await res.json()) as { results: MCPSearchResult[] };
+			if (!Array.isArray(data?.results)) throw new Error("Invalid section response");
+			if (requestId !== sectionRequestId.current) return;
 
-			const transformed: SpecSearchResult[] = (data.results || []).map((r: MCPSearchResult) => ({
+			const mapped = data.results.filter((r) => {
+				if (!r || typeof r !== "object") return false;
+				const config = PDF_CONFIG[r.partNumber];
+				return (
+					config &&
+					Number.isInteger(r.partNumber) &&
+					// /section returns mapped descendants for a section prefix too.
+					(r.sectionId === null || typeof r.sectionId === "string") &&
+					r.pageNumber !== null &&
+					Number.isInteger(r.pageNumber) &&
+					r.pageNumber >= 1 &&
+					r.pageNumber <= config.totalPages &&
+					(r.title === null || typeof r.title === "string") &&
+					typeof r.content === "string"
+				);
+			});
+			const transformed: SpecSearchResult[] = mapped.map((r: MCPSearchResult) => ({
 				id: `spec-${r.id}`,
 				sectionId: r.sectionId || initialSection,
 				title: r.title || r.content.slice(0, 60),
@@ -128,25 +196,43 @@ export function SpecExplorer() {
 			setSelectedIndex(0);
 			if (transformed.length > 0) {
 				setSelectedResult(transformed[0]);
+				setSectionStatus("ready");
+			} else {
+				setSelectedResult(null);
+				setSectionStatus("missing");
 			}
 		} catch (err) {
+			if (requestId !== sectionRequestId.current) return;
 			console.error("Section lookup failed:", err);
+			setSectionStatus("error");
 		} finally {
-			setIsLoading(false);
+			window.clearTimeout(timeout);
+			if (requestId === sectionRequestId.current) setIsLoading(false);
 		}
-	}, [initialSection, initialPart]);
+	}, [initialSection, initialPart, cancelSectionLookup]);
+
+	useEffect(() => {
+		let active = true;
+		// StrictMode's initial setup/cleanup must not cancel the only lookup or
+		// issue a duplicate request. Start after that synchronous cleanup.
+		queueMicrotask(() => {
+			if (active && initialSection) void handleSectionLookup();
+		});
+		return () => {
+			active = false;
+			cancelSectionLookup();
+		};
+	}, [initialSection, handleSectionLookup, cancelSectionLookup]);
 
 	// Auto-search or section lookup on load
 	useEffect(() => {
 		if (hasAutoSearched.current) return;
 		hasAutoSearched.current = true;
 
-		if (initialSection) {
-			handleSectionLookup();
-		} else if (initialQuery) {
+		if (!initialSection && initialQuery) {
 			handleSubmit();
 		}
-	}, [initialSection, initialQuery, handleSectionLookup, handleSubmit]);
+	}, [initialSection, initialQuery, handleSubmit]);
 
 	// Handle Enter key to submit
 	const handleKeyDown = useCallback(
@@ -307,11 +393,53 @@ export function SpecExplorer() {
 
 				{/* PDF viewer */}
 				<div className="overflow-hidden">
-					<PdfViewer
-						partNumber={selectedResult?.partNumber ?? 1}
-						pageNumber={selectedResult?.pageNumber ?? 1}
-						onPageChange={handlePageChange}
-					/>
+					{sectionStatus === "ready" ? (
+						<PdfViewer
+							partNumber={selectedResult?.partNumber ?? 1}
+							pageNumber={selectedResult?.pageNumber ?? 1}
+							onPageChange={handlePageChange}
+						/>
+					) : (
+						<div className="flex h-full items-center justify-center bg-[var(--color-bg-secondary)] p-8">
+							<div
+								className="max-w-md space-y-4"
+								role={sectionStatus === "pending" ? "status" : "alert"}
+							>
+								<h2 className="text-lg font-semibold">
+									{sectionStatus === "pending"
+										? "Loading requested section"
+										: sectionStatus === "missing"
+											? "No mapped page found"
+											: "Section lookup unavailable"}
+								</h2>
+								<p className="text-sm text-[var(--color-text-secondary)]">
+									{sectionStatus === "pending"
+										? "The specification will open at the requested section when its page is available."
+										: "Try the section lookup again, search for another section, or open the official PDF directly."}
+								</p>
+								<div className="flex flex-wrap items-center gap-4 text-sm">
+									{sectionStatus !== "pending" && (
+										<button
+											type="button"
+											onClick={() => void handleSectionLookup()}
+											disabled={isLoading}
+											className="rounded border border-[var(--color-border)] px-3 py-2 disabled:opacity-50"
+										>
+											Retry section lookup
+										</button>
+									)}
+									<a
+										href={officialPdf}
+										target="_blank"
+										rel="noopener noreferrer"
+										className="underline"
+									>
+										Open official PDF
+									</a>
+								</div>
+							</div>
+						</div>
+					)}
 				</div>
 			</main>
 		</div>

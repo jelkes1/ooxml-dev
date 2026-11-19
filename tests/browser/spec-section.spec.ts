@@ -73,7 +73,7 @@ test("a part2 deep link never mounts or preloads default part1", async ({ page }
 	const pending = deferred();
 	const pdfs = await isolate(page, async route => {
 		await pending.promise;
-		await route.fulfill({ json: result(2, 77) });
+		await route.fulfill({ json: result(2, 77, "9.1") });
 	});
 	try {
 		await lookup(page, "section=9.1&part=2");
@@ -86,7 +86,7 @@ test("a part2 deep link never mounts or preloads default part1", async ({ page }
 	} finally { pending.resolve(); }
 });
 
-for (const failure of ["http", "missing", "invalid-page", "invalid-part", "malformed"] as const) {
+for (const failure of ["http", "missing", "invalid-page", "page-range", "fractional-page", "invalid-part", "invalid-title", "malformed"] as const) {
 	test(`${failure} lookup keeps the PDF unmounted and can retry successfully`, async ({ page }) => {
 		let attempts = 0;
 		const pdfs = await isolate(page, async route => {
@@ -95,7 +95,10 @@ for (const failure of ["http", "missing", "invalid-page", "invalid-part", "malfo
 			if (failure === "http") return route.fulfill({ status: 503, json: { error: "unavailable" } });
 			if (failure === "missing") return route.fulfill({ json: { results: [] } });
 			if (failure === "invalid-page") return route.fulfill({ json: result(1, null) });
+			if (failure === "page-range") return route.fulfill({ json: result(1, 5017) });
+			if (failure === "fractional-page") return route.fulfill({ json: result(1, 239.5) });
 			if (failure === "invalid-part") return route.fulfill({ json: result(9) });
+			if (failure === "invalid-title") return route.fulfill({ json: { results: [{ ...result().results[0], title: {} }] } });
 			return route.fulfill({ json: { results: "invalid" } });
 		});
 		await page.goto("/spec?section=17.3.1.24&part=1");
@@ -123,6 +126,42 @@ test("normal no-section browsing immediately opens page1 and keeps page controls
 	expect(lookups).toBe(0);
 });
 
+test("a parent section keeps the service's mapped descendant results browsable", async ({ page }) => {
+	await isolate(page, async route => {
+		await route.fulfill({ json: { results: [
+			result(1, 20, "17.3.1").results[0],
+			{ ...result(1, 21, "17.3.2").results[0], id: 2 },
+		] } });
+	});
+	await page.goto("/spec?section=17.3&part=1");
+	await expect(page.locator("iframe")).toHaveAttribute("src", `${part1}#page=30&toolbar=0&navpanes=0`);
+	await page.getByRole("button", { name: /17\.3\.2/ }).click();
+	await expect(page.locator("iframe")).toHaveAttribute("src", `${part1}#page=31&toolbar=0&navpanes=0`);
+});
+
+test("a stalled lookup times out without a PDF and offers a working retry", async ({ page }) => {
+	const stalled = deferred();
+	let attempts = 0;
+	await page.clock.install();
+	await isolate(page, async route => {
+		if (++attempts === 1) {
+			await stalled.promise;
+			await route.fulfill({ json: result() }).catch(() => {}); // Timed-out request is aborted.
+		} else {
+			await route.fulfill({ json: result() });
+		}
+	});
+	try {
+		await lookup(page);
+		await expect.poll(() => attempts).toBe(1);
+		await page.clock.fastForward(15_001);
+		await expect(page.getByRole("alert")).toBeVisible();
+		await expect(page.locator("iframe")).toHaveCount(0);
+		await page.getByRole("button", { name: "Retry section lookup" }).click();
+		await expect(page.locator("iframe")).toHaveAttribute("src", `${part1}#page=249&toolbar=0&navpanes=0`);
+	} finally { stalled.resolve(); }
+});
+
 test("a user search can recover a failed explicit section lookup", async ({ page }) => {
 	await isolate(page, async route => {
 		if (new URL(route.request().url()).pathname.endsWith("/section")) {
@@ -134,7 +173,7 @@ test("a user search can recover a failed explicit section lookup", async ({ page
 	await page.goto("/spec?section=17.3.1.24&part=1");
 	await expect(page.getByRole("alert")).toBeVisible();
 	await page.locator("textarea").fill("package relationships");
-	await page.getByRole("button", { name: "Search", exact: true }).click();
+	await page.locator("textarea").press("Enter");
 	await expect(page.locator("iframe")).toHaveAttribute("src", `${pdfOrigin}/ecma-376/part2.pdf#page=85&toolbar=0&navpanes=0`);
 	await expect(page.getByRole("alert")).toHaveCount(0);
 });
